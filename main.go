@@ -3,20 +3,17 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
-	"net/url"
+	"log"
 	"os"
 	"os/signal"
-	gopath "path"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
-	"github.com/cheggaaa/pb/v3"
-	files "github.com/ipfs/go-ipfs-files"
+	"github.com/ipfs/go-cid"
+	format "github.com/ipfs/go-ipld-format"
 	iface "github.com/ipfs/interface-go-ipfs-core"
-	ipath "github.com/ipfs/interface-go-ipfs-core/path"
 	cli "github.com/urfave/cli/v2"
 )
 
@@ -30,15 +27,10 @@ func main() {
 	defer doCleanup()
 
 	app := cli.NewApp()
-	app.Name = "ipget"
-	app.Usage = "Retrieve and save IPFS objects."
+	app.Name = "ipverify"
+	app.Usage = "Verify IPFS objects."
 	app.Version = "0.9.1"
 	app.Flags = []cli.Flag{
-		&cli.StringFlag{
-			Name:    "output",
-			Aliases: []string{"o"},
-			Usage:   "specify output location",
-		},
 		&cli.StringFlag{
 			Name:    "node",
 			Aliases: []string{"n"},
@@ -50,9 +42,17 @@ func main() {
 			Aliases: []string{"p"},
 			Usage:   "specify a set of IPFS peers to connect to",
 		},
+		&cli.IntFlag{
+			Name:    "offset",
+			Aliases: []string{"o"},
+			Usage:   "specify which line to start on in input file; note: 1-indexed",
+			Value:   1,
+		},
 		&cli.BoolFlag{
-			Name:  "progress",
-			Usage: "show a progress bar",
+			Name:    "show-stat",
+			Aliases: []string{"ss"},
+			Usage:   "show the node stat output",
+			Value:   false,
 		},
 	}
 
@@ -62,23 +62,11 @@ func main() {
 
 	app.Action = func(c *cli.Context) error {
 		if !c.Args().Present() {
-			return fmt.Errorf("usage: ipget <ipfs ref>")
-		}
-
-		outPath := c.String("output")
-		iPath, err := parsePath(c.Args().First())
-		if err != nil {
-			return err
-		}
-
-		// Use the final segment of the object's path if no path was given.
-		if outPath == "" {
-			trimmed := strings.TrimRight(iPath.String(), "/")
-			_, outPath = filepath.Split(trimmed)
-			outPath = filepath.Clean(outPath)
+			return fmt.Errorf("usage: ipverify <newline delimited file of cids>")
 		}
 
 		var ipfs iface.CoreAPI
+		var err error
 		switch c.String("node") {
 		case "fallback":
 			ipfs, err = http(ctx)
@@ -99,22 +87,83 @@ func main() {
 			return err
 		}
 
-		go connect(ctx, ipfs, c.StringSlice("peers"))
+		connect(ctx, ipfs, c.StringSlice("peers"))
 
-		out, err := ipfs.Unixfs().Get(ctx, iPath)
+		cidFile := c.Args().First()
+		data, err := os.ReadFile(cidFile)
 		if err != nil {
-			if err == context.Canceled {
-				return <-sigExitCoder
-			}
-			return cli.Exit(err, 2)
+			log.Fatal(err)
+			return err
 		}
-		err = WriteTo(out, outPath, c.Bool("progress"))
+
+		str := string(data)
+		cidsstr := strings.Split(str, "\n")
+		cidsstr = cidsstr[:len(cidsstr)-1]
+
+		f, err := os.OpenFile("failed.cids", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			if err == context.Canceled {
-				return <-sigExitCoder
-			}
-			return cli.Exit(err, 2)
+			log.Println(err)
+			return err
 		}
+		defer f.Close()
+
+		offset := c.Int("offset") - 1
+		if offset < 0 {
+			offset = 0
+		}
+
+		for i := offset; i < len(cidsstr); i++ {
+			if (i+1)%10 == 0 {
+				percent := float64((i - offset)) / float64(len(cidsstr)-offset-1) * float64(100)
+				fmt.Printf("%d/%d\t%f%%\t%s\n", i-offset, len(cidsstr)-offset-1, percent, cidsstr[i])
+			}
+			cs := cidsstr[i]
+
+			stat, err := getNodeStat(ctx, ipfs, cs)
+			if err != nil {
+				if err == context.DeadlineExceeded {
+					if _, err := f.WriteString(fmt.Sprintf("%s\n", cs)); err != nil {
+						fmt.Println("failed to write failed cid to file")
+						fmt.Println(cs)
+					}
+					continue
+				} else {
+					return cli.Exit(err, 2)
+				}
+			}
+			if c.Bool("show-stat") {
+				fmt.Println(stat.String())
+			}
+		}
+		// 		ipr, err := ipfs.Block().Get(ctx, iPath)
+		// 		if err != nil {
+		// 			if err == context.Canceled {
+		// 				return <-sigExitCoder
+		// 			}
+		// 			return cli.Exit(err, 2)
+		// 		}
+		// 		fmt.Println("block request made")
+		// 		lipr := io.LimitReader(ipr, 4)
+
+		// 		blk := []byte{}
+		// 		fmt.Println("attempting to read from block")
+		// 		n, err := lipr.Read(blk)
+		// 		if err != nil {
+		// 			if err == context.Canceled {
+		// 				return <-sigExitCoder
+		// 			}
+		// 			return cli.Exit(err, 2)
+		// 		}
+		// 		fmt.Println("value of n is: ", n)
+		// 		if n == 4 {
+		// 			return cli.Exit(string(blk), 0)
+		// 		}
+		// 		if n != 4 {
+		// 			if err == context.Canceled {
+		// 				return <-sigExitCoder
+		// 			}
+		// 			return cli.Exit(err, 2)
+		// 		}
 		return nil
 	}
 
@@ -127,10 +176,7 @@ func main() {
 		cancel()
 	}()
 
-	// cli library requires flags before arguments
-	args := movePostfixOptions(os.Args)
-
-	err := app.Run(args)
+	err := app.Run(os.Args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		doCleanup()
@@ -138,107 +184,26 @@ func main() {
 	}
 }
 
-// movePostfixOptions moves non-flag arguments to end of argument list.
-func movePostfixOptions(args []string) []string {
-	var endArgs []string
-	for idx := 1; idx < len(args); idx++ {
-		if args[idx][0] == '-' {
-			if !strings.Contains(args[idx], "=") {
-				idx++
-			}
-			continue
-		}
-		if endArgs == nil {
-			// on first write, make copy of args
-			newArgs := make([]string, len(args))
-			copy(newArgs, args)
-			args = newArgs
-		}
-		// add to args accumulator
-		endArgs = append(endArgs, args[idx])
-		// remove from real args list
-		args = args[:idx+copy(args[idx:], args[idx+1:])]
-		idx--
-	}
+func getNodeStat(ctx context.Context, ipfs iface.CoreAPI, cs string) (*format.NodeStat, error) {
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+	defer cancel()
 
-	// append extracted arguments to the real args
-	return append(args, endArgs...)
-}
-
-func parsePath(path string) (ipath.Path, error) {
-	ipfsPath := ipath.New(path)
-	if ipfsPath.IsValid() == nil {
-		return ipfsPath, nil
-	}
-
-	u, err := url.Parse(path)
+	cidarg, err := cid.Parse(cs)
 	if err != nil {
-		return nil, fmt.Errorf("%q could not be parsed: %s", path, err)
+		return nil, err
 	}
 
-	switch proto := u.Scheme; proto {
-	case "ipfs", "ipld", "ipns":
-		ipfsPath = ipath.New(gopath.Join("/", proto, u.Host, u.Path))
-	case "http", "https":
-		ipfsPath = ipath.New(u.Path)
-	default:
-		return nil, fmt.Errorf("%q is not recognized as an IPFS path", path)
-	}
-	return ipfsPath, ipfsPath.IsValid()
-}
-
-// WriteTo writes the given node to the local filesystem at fpath.
-func WriteTo(nd files.Node, fpath string, progress bool) error {
-	s, err := nd.Size()
+	nod, err := ipfs.Dag().Get(ctx, cidarg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	var bar *pb.ProgressBar
-	if progress {
-		bar = pb.New64(s).Start()
+	stat, err := nod.Stat()
+	if err != nil {
+		return nil, err
 	}
 
-	return writeToRec(nd, fpath, bar)
-}
-
-func writeToRec(nd files.Node, fpath string, bar *pb.ProgressBar) error {
-	switch nd := nd.(type) {
-	case *files.Symlink:
-		return os.Symlink(nd.Target, fpath)
-	case files.File:
-		f, err := os.Create(fpath)
-		defer f.Close()
-		if err != nil {
-			return err
-		}
-
-		var r io.Reader = nd
-		if bar != nil {
-			r = bar.NewProxyReader(r)
-		}
-		_, err = io.Copy(f, r)
-		if err != nil {
-			return err
-		}
-		return nil
-	case files.Directory:
-		err := os.Mkdir(fpath, 0777)
-		if err != nil {
-			return err
-		}
-
-		entries := nd.Entries()
-		for entries.Next() {
-			child := filepath.Join(fpath, entries.Name())
-			if err := writeToRec(entries.Node(), child, bar); err != nil {
-				return err
-			}
-		}
-		return entries.Err()
-	default:
-		return fmt.Errorf("file type %T at %q is not supported", nd, fpath)
-	}
+	return stat, nil
 }
 
 func addCleanup(f func() error) {
