@@ -15,6 +15,7 @@ import (
 	format "github.com/ipfs/go-ipld-format"
 	iface "github.com/ipfs/interface-go-ipfs-core"
 	cli "github.com/urfave/cli/v2"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -53,6 +54,12 @@ func main() {
 			Aliases: []string{"ss"},
 			Usage:   "show the node stat output",
 			Value:   false,
+		},
+		&cli.IntFlag{
+			Name:    "goroutines",
+			Aliases: []string{"gs"},
+			Usage:   "the number of goroutines used to verify cids",
+			Value:   5,
 		},
 	}
 
@@ -112,6 +119,9 @@ func main() {
 			offset = 0
 		}
 
+		g, ctx := errgroup.WithContext(ctx)
+		g.SetLimit(c.Int("goroutines"))
+
 		for i := offset; i < len(cidsstr); i++ {
 			if (i+1)%10 == 0 {
 				percent := float64((i - offset)) / float64(len(cidsstr)-offset-1) * float64(100)
@@ -119,21 +129,27 @@ func main() {
 			}
 			cs := cidsstr[i]
 
-			stat, err := getNodeStat(ctx, ipfs, cs)
-			if err != nil {
-				if err == context.DeadlineExceeded {
-					if _, err := f.WriteString(fmt.Sprintf("%s\n", cs)); err != nil {
-						fmt.Println("failed to write failed cid to file")
-						fmt.Println(cs)
+			g.Go(func() error {
+				cs := cs
+				stat, err := getNodeStat(ctx, ipfs, cs)
+				if err != nil {
+					if err == context.DeadlineExceeded {
+						if _, err := f.WriteString(fmt.Sprintf("%s\n", cs)); err != nil {
+							fmt.Println("failed to write failed cid to file")
+							fmt.Println(cs)
+						}
+						return nil
 					}
-					continue
-				} else {
-					return cli.Exit(err, 2)
+					return err
 				}
-			}
-			if c.Bool("show-stat") {
-				fmt.Println(stat.String())
-			}
+				if c.Bool("show-stat") {
+					fmt.Println(stat.String())
+				}
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return fmt.Errorf("errgroup wait failed: %w", err)
 		}
 		// 		ipr, err := ipfs.Block().Get(ctx, iPath)
 		// 		if err != nil {
@@ -185,7 +201,8 @@ func main() {
 }
 
 func getNodeStat(ctx context.Context, ipfs iface.CoreAPI, cs string) (*format.NodeStat, error) {
-	ctx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+	//TODO: make the timeout value a cli flag
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Seconds)
 	defer cancel()
 
 	cidarg, err := cid.Parse(cs)
