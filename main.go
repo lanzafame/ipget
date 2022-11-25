@@ -67,6 +67,15 @@ func main() {
 	defer cancel()
 	sigExitCoder := make(chan cli.ExitCoder, 1)
 
+	// Catch interrupt signal
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigs
+		sigExitCoder <- cli.Exit("", 128+int(sig.(syscall.Signal)))
+		cancel()
+	}()
+
 	app.Action = func(c *cli.Context) error {
 		if !c.Args().Present() {
 			return fmt.Errorf("usage: ipverify <newline delimited file of cids>")
@@ -122,34 +131,44 @@ func main() {
 		g, ctx := errgroup.WithContext(ctx)
 		g.SetLimit(c.Int("goroutines"))
 
-		for i := offset; i < len(cidsstr); i++ {
-			if (i+1)%10 == 0 {
-				percent := float64((i - offset)) / float64(len(cidsstr)-offset-1) * float64(100)
-				fmt.Printf("%d/%d\t%f%%\t%s\n", i-offset, len(cidsstr)-offset-1, percent, cidsstr[i])
-			}
-			cs := cidsstr[i]
-
-			g.Go(func() error {
-				cs := cs
-				stat, err := getNodeStat(ctx, ipfs, cs)
-				if err != nil {
-					if err == context.DeadlineExceeded {
-						if _, err := f.WriteString(fmt.Sprintf("%s\n", cs)); err != nil {
-							fmt.Println("failed to write failed cid to file")
-							fmt.Println(cs)
-						}
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+				for i := offset; i < len(cidsstr); i++ {
+					if ctx.Err() != nil {
 						return nil
 					}
-					return err
+					if (i+1)%10 == 0 {
+						percent := float64((i - offset)) / float64(len(cidsstr)-offset-1) * float64(100)
+						fmt.Printf("%d/%d\t%f%%\t%s\n", i-offset, len(cidsstr)-offset-1, percent, cidsstr[i])
+					}
+					cs := cidsstr[i]
+
+					g.Go(func() error {
+						cs := cs
+						stat, err := getNodeStat(ctx, ipfs, cs)
+						if err != nil {
+							if err == context.DeadlineExceeded {
+								if _, err := f.WriteString(fmt.Sprintf("%s\n", cs)); err != nil {
+									fmt.Println("failed to write failed cid to file")
+									fmt.Println(cs)
+								}
+								return nil
+							}
+							return err
+						}
+						if c.Bool("show-stat") {
+							fmt.Println(stat.String())
+						}
+						return nil
+					})
 				}
-				if c.Bool("show-stat") {
-					fmt.Println(stat.String())
+				if err := g.Wait(); err != nil {
+					return fmt.Errorf("errgroup wait failed: %w", err)
 				}
-				return nil
-			})
-		}
-		if err := g.Wait(); err != nil {
-			return fmt.Errorf("errgroup wait failed: %w", err)
+			}
 		}
 		// 		ipr, err := ipfs.Block().Get(ctx, iPath)
 		// 		if err != nil {
@@ -182,15 +201,6 @@ func main() {
 		// 		}
 		return nil
 	}
-
-	// Catch interrupt signal
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigs
-		sigExitCoder <- cli.Exit("", 128+int(sig.(syscall.Signal)))
-		cancel()
-	}()
 
 	err := app.Run(os.Args)
 	if err != nil {
