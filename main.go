@@ -202,7 +202,7 @@ func main() {
 
 func getNodeStat(ctx context.Context, ipfs iface.CoreAPI, cs string) (*format.NodeStat, error) {
 	//TODO: make the timeout value a cli flag
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 
 	cidarg, err := cid.Parse(cs)
