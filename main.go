@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +25,22 @@ var (
 )
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+
+			stacktrace, err := os.OpenFile(fmt.Sprintf("ipverify.stacktrace.%d", time.Now().Unix()), os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			defer stacktrace.Close()
+			if _, err := stacktrace.WriteString(string(debug.Stack())); err != nil {
+				fmt.Println("failed to write stacktrace")
+				fmt.Println(string(debug.Stack()))
+				return
+			}
+		}
+	}()
 	// Do any cleanup on exit
 	defer doCleanup()
 
