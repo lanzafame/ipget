@@ -123,6 +123,13 @@ func main() {
 		}
 		defer f.Close()
 
+		progressF, err := os.OpenFile(fmt.Sprintf("ipverify.progress.%d", time.Now().Unix()), os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Println(err)
+			return err
+		}
+		defer progressF.Close()
+
 		offset := c.Int("offset") - 1
 		if offset < 0 {
 			offset = 0
@@ -137,6 +144,10 @@ func main() {
 				return nil
 			default:
 				for i := offset; i < len(cidsstr); i++ {
+					if _, err := progressF.WriteString(fmt.Sprintln(i)); err != nil {
+						fmt.Println("failed to write to progress file")
+						fmt.Println(i)
+					}
 					if ctx.Err() != nil {
 						return nil
 					}
