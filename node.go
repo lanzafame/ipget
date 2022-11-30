@@ -66,7 +66,7 @@ func open(ctx context.Context, repoPath string) (iface.CoreAPI, error) {
 	// Construct the node
 	node, err := core.NewNode(ctx, &core.BuildCfg{
 		Online:  true,
-		Routing: libp2p.DHTClientOption,
+		Routing: libp2p.NilRouterOption,
 		Repo:    r,
 	})
 	if err != nil {
@@ -116,6 +116,8 @@ func tmpNode(ctx context.Context) (iface.CoreAPI, error) {
 	cfg.Routing.Type = "dhtclient"
 
 	cfg.Datastore.NoSync = true
+
+	cfg.Bootstrap = nil
 
 	err = fsrepo.Init(dir, cfg)
 	if err != nil {

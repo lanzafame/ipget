@@ -15,6 +15,8 @@ import (
 	"github.com/ipfs/go-cid"
 	format "github.com/ipfs/go-ipld-format"
 	iface "github.com/ipfs/interface-go-ipfs-core"
+	"github.com/libp2p/go-libp2p/core/peer"
+	ma "github.com/multiformats/go-multiaddr"
 	cli "github.com/urfave/cli/v2"
 	"golang.org/x/sync/errgroup"
 )
@@ -159,6 +161,31 @@ func main() {
 				return nil
 			default:
 				for i := offset; i < len(cidsstr); i++ {
+					//TODO: confirm that only the provided peer is in the peerset and no other peers
+					if peers, err := ipfs.Swarm().Peers(ctx); err != nil {
+						return err
+					} else if len(peers) > 1 {
+						for _, p := range peers {
+							if p.ID().String() != "QmQzqxhK82kAmKvARFZSkUVS6fo9sySaiogAnx5EnZ6ZmC" {
+								ai := peer.AddrInfo{ID: p.ID(), Addrs: []ma.Multiaddr{p.Address()}}
+								pa, err := peer.AddrInfoToP2pAddrs(&ai)
+								if err != nil {
+									return err
+								}
+								disconnects := 0
+								for _, a := range pa {
+									if err := ipfs.Swarm().Disconnect(ctx, a); err != nil {
+										fmt.Println(p.Address().String())
+										fmt.Println(err)
+										return err
+									}
+									disconnects++
+								}
+								fmt.Printf("num of disconnects: %d\n", disconnects)
+							}
+						}
+					}
+
 					if _, err := progressF.WriteString(fmt.Sprintln(i)); err != nil {
 						fmt.Println("failed to write to progress file")
 						fmt.Println(i)
